@@ -3,6 +3,7 @@ import argparse
 import re
 import ipaddress
 import socket
+import threading
 import datetime
 
 # Converts an IP (IPv4 or IPv6), IP subnet, or hostname to Python's IP address (or network) format depending on what is needed, and handles some possible bad inputs.
@@ -15,11 +16,9 @@ def parse_ip(ip, mode='address'):
     except ValueError:
         try:
             ip = socket.gethostbyname(ip)
-        except socket.gaierror:
+        except:
             print('[ {} ]: \'{}\' could not be resolved to an IP address.'.format(str(datetime.datetime.now()), ip))
             exit(1)
-        else:
-            ip = ipaddress.ip_address(ip)
     return ip
 
 def parse_port(port):
@@ -73,24 +72,68 @@ def is_ip_authorized(ip, whitelist, blacklist_mode=False):
     else:
         return True
 
+def handler(source_socket, destination_socket, buffer_size=4096):
+    try:
+        while True:
+            data = source_socket.recv(buffer_size)
+            if not data:
+                break
+            destination_socket.send(data)
+    except:
+        print('[ {} ]: Client at IP address {} disconnected.'.format(str(datetime.datetime.now()), 'PLACEHOLDER'))
+
+def forward(client_socket, server_info):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.connect((str(server_info['host']), server_info['port']))
+    client_listen = threading.Thread(target=handler, args=(client_socket, server_socket))
+    server_listen = threading.Thread(target=handler, args=(server_socket, client_socket))
+    client_listen.start()
+    server_listen.start()
+    client_listen.join()
+    server_listen.join()
+    client_socket.close()
+    server_socket.close()
+
+def server(port, real_destination, fake_destination, whitelist, blacklist_mode):
+    proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    proxy        = socket.gethostname()
+    source_info  = {}
+    
+    try:
+        proxy_socket.bind((proxy, port))
+    except:
+        print('[ {} ]: Could not bind script to port {}; check that it is not in use already.'.format(str(datetime.datetime.now()), port))
+        exit(1)
+    proxy_socket.listen(5)
+    while True:
+        client_socket, source = proxy_socket.accept()
+        source_info['host'], source_info['port'] = source
+        if is_ip_authorized(source_info['host'], whitelist, blacklist_mode):
+            print('[ {} ]: Authorized client at IP address {} connected, forwarded to {}:{}.'.format(str(datetime.datetime.now()), source_info['host'], real_destination['host'], real_destination['port']))
+            proxy_thread = threading.Thread(target=forward, args=(client_socket, real_destination))
+        else:
+            print('[ {} ]: Unauthorized client at IP address {} connected, forwarded to {}:{}.'.format(str(datetime.datetime.now()), source_info['host'], fake_destination['host'], fake_destination['port']))
+            proxy_thread = threading.Thread(target=forward, args=(client_socket, fake_destination))
+        proxy_thread.start()
+    proxy_socket.close()
+
 def main():
-    description = "This script is one which binds to a port on the local machine and acts as a binary conditional proxy for incoming packets.  " \
+    DESCRIPTION = "This script is one which binds to a port on the local machine and acts as a binary conditional proxy for incoming packets.  " \
                   "When the script receives a packet, it parses a list of IP addresses and subnets to determine where it gets proxied off to.  " \
                   "One way or another, the destination IP and/or port will be changed to something else depending on what the source IP is.  " \
                   "This is to be used as an extra layer of security for valuable ports, which unlike a firewall can be used to redirect unauthorized users to distracting honeypots rather than dropping or rejecting them outright."
-    epilog = "Note the effectiveness of this script depends mainly on it running within the host where the valued port is located.  " \
+    EPILOG = "Note the effectiveness of this script depends mainly on it running within the host where the valued port is located.  " \
              "This way, the valued port (which has a different port number) can be blocked entirely by the firewall so that only localhost connections are allowed.  " \
              "In turn, this will (or may) require that all connections through that port pass through this script first with the port that it binds to.  " \
              "The honeypot may be on any other host and/or port, assuming it will accept non-localhost connections."
     
     # Here are the script's arguments using the default parsing provided by Python.  This is not the same kind of parsing done by the script, since this parsing only cares that the data types are correct.
-    parser = argparse.ArgumentParser(description=description, epilog=epilog)
+    parser = argparse.ArgumentParser(description=DESCRIPTION, epilog=EPILOG)
     parser.add_argument('--port', type=int, required=True, help='local port to bind and listen to')
     parser.add_argument('--real-destination', type=str, default='0.0.0.0:0', help='regular host:port to send whitelisted IP addresses to')
     parser.add_argument('--fake-destination', type=str, default='0.0.0.0:0', help='honeypot host:port to send non-whitelisted IP addresses to')
     parser.add_argument('--whitelist', type=str, help='path to text file of whitelisted IP addresses (newline-delimited)')
     parser.add_argument('--blacklist-mode', action='store_true', help='use whitelist text file to blacklist rather than whitelist IP addresses')
-    parser.add_argument('--test-ip', type=str, default='0.0.0.0:0', help='test IP to evaluate against is_ip_authorized(); REMOVE BY FINAL VERSION')
     args = parser.parse_args()
 
     # Now for the script's own parsing and error-checking...
@@ -99,16 +142,7 @@ def main():
     fake_destination = parse_destination(args.fake_destination)
     whitelist        = parse_whitelist(args.whitelist)
     
-    # Argument tests to prove current script (i.e. parsing) is working as it should.  Also a placeholder for proxy functions until they get done, after which this block will be removed.
-    print('\nPort: {}'.format(port))
-    print('\nReal Destination: {}'.format(real_destination))
-    print('\nFake Destination: {}'.format(fake_destination))
-    print('\nWhitelist: {}'.format(whitelist))
-    print('\nBlacklist? {}'.format(args.blacklist_mode))
-    test_ip_result = is_ip_authorized(args.test_ip, whitelist, blacklist_mode=args.blacklist_mode)
-    print('\nTest IP Authorized? {}\n'.format(test_ip_result))
-    
-    # >>> PROXY TOMFOOLERY GOES HERE <<<
+    server(port, real_destination, fake_destination, whitelist, args.blacklist_mode)
     
     exit(0)
 
