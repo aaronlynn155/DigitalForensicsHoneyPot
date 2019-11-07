@@ -13,23 +13,26 @@ class Connection:
     
     def bridge(self, server_ipport):
         self.server_ipport = server_ipport
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.connect(self.server_ipport)
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        except:
+            print('[ {} ]: Failed to create socket for server at {}:{}.'.format(str(datetime.datetime.now()), self.server_ipport[0], self.server_ipport[1]))
+            self.client_socket.close()
+            raise
+        try:
+            self.server_socket.connect(self.server_ipport)
+        except:
+            print('[ {} ]: Failed to connect to server at {}:{}.'.format(str(datetime.datetime.now()), self.server_ipport[0], self.server_ipport[1]))
+            self.client_socket.close()
+            raise
     
     def open(self):
-        self.main_listener = threading.Thread(target=self.__main_handler)
-        self.main_listener.start()
-    
-    def __main_handler(self):
-        self.client_listener = threading.Thread(target=self.__host_handler, args=(self.client_socket, self.client_ipport, self.server_socket, self.server_ipport, True))
-        self.server_listener = threading.Thread(target=self.__host_handler, args=(self.server_socket, self.server_ipport, self.client_socket, self.client_ipport, False))
+        self.client_listener = threading.Thread(target=self.__handler, args=(self.client_socket, self.client_ipport, self.server_socket, self.server_ipport, True))
+        self.server_listener = threading.Thread(target=self.__handler, args=(self.server_socket, self.server_ipport, self.client_socket, self.client_ipport, False))
         self.client_listener.start()
         self.server_listener.start()
-        self.client_listener.join()
-        self.server_listener.join()
-        self.close()
     
-    def __host_handler(self, source_socket, source_ipport, destination_socket, destination_ipport, is_client):
+    def __handler(self, source_socket, source_ipport, destination_socket, destination_ipport, is_client):
         try:
             while True:
                 data = source_socket.recv(self.buffer_size)
@@ -38,35 +41,41 @@ class Connection:
                 destination_socket.send(data)
         except ConnectionResetError:
             if is_client:
-                print('[ {} ]: Client at {} disconnected; connection to server at {}:{} closed automatically.'.format(str(datetime.datetime.now()), source_ipport[0], destination_ipport[0], destination_ipport[1]))
+                print('[ {} ]: Client at {} disconnected from server at {}:{}.'.format(str(datetime.datetime.now()), source_ipport[0], destination_ipport[0], destination_ipport[1]))
             else:
-                print('[ {} ]: Server at {}:{} disconnected; connection to client at {} closed automatically.'.format(str(datetime.datetime.now()), source_ipport[0], source_ipport[1], destination_ipport[0]))
+                print('[ {} ]: Server at {}:{} disconnected from client at {}.'.format(str(datetime.datetime.now()), source_ipport[0], source_ipport[1], destination_ipport[0]))
+        except ConnectionAbortedError:
+            pass
+        self.close()
     
     def close(self):
         self.client_socket.close()
-        self.server_socket.close()   
+        self.server_socket.close()
 
 class Server:
     def __init__(self, proxy_port, real_destination, fake_destination, whitelist, blacklist_mode, localhost_mode=False):
-        self.proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self.proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        except:
+            print('[ {} ]: Failed to create socket for script.'.format(str(datetime.datetime.now())))
+            exit(1)
         
         if localhost_mode:
             self.proxy_ipport = ('127.0.0.1', proxy_port)
         else:
-            self.proxy_ipport = (socket.gethostname(), proxy_port)
+            self.proxy_ipport = (socket.gethostbyname(socket.gethostname()), proxy_port)
         
         self.real_destination = real_destination
         self.fake_destination = fake_destination
         self.whitelist        = whitelist
         self.blacklist_mode   = blacklist_mode
-        self.connections      = []
 
     def start(self):
         try:
             self.proxy_socket.bind(self.proxy_ipport)
         except:
             print('[ {} ]: Could not bind script to port {}; check that it is not in use already.'.format(str(datetime.datetime.now()), self.proxy_ipport[1]))
-            raise
+            exit(1)
         self.proxy_socket.listen(5)
         self.listener = threading.Thread(target=self.__handler)
         self.listener.start()
@@ -77,16 +86,20 @@ class Server:
             connection = Connection((client_socket, client_ipport))
             if self.__is_ip_authorized(client_ipport[0]):
                 print('[ {} ]: Authorized client at {} connected, forwarded to {}:{}.'.format(str(datetime.datetime.now()), client_ipport[0], self.real_destination[0], self.real_destination[1]))
-                connection.bridge(self.real_destination)
+                try:
+                    connection.bridge(self.real_destination)
+                except:
+                    continue
             else:
                 print('[ {} ]: Unauthorized client at {} connected, forwarded to {}:{}.'.format(str(datetime.datetime.now()), client_ipport[0], self.fake_destination[0], self.fake_destination[1]))
-                connection.bridge(self.fake_destination)
+                try:
+                    connection.bridge(self.fake_destination)
+                except:
+                    continue
             connection.open()
-            
-        connection.close()
+        self.close()
 
     def close(self):
-        self.listener.join()
         self.proxy_socket.close()
 
     # Checks to see if an IP will be allowed through or sent to the honeypot based on how it evaluates against entries in the whitelist (or optionally blacklist)
@@ -113,6 +126,7 @@ def parse_ip(ip, mode='address'):
         if ip:
             try:
                 ip = socket.gethostbyname(ip)
+                ip = ipaddress.ip_address(ip)
             except:
                 print('[ {} ]: \'{}\' could not be resolved to an IP address.'.format(str(datetime.datetime.now()), ip))
                 ip = None
@@ -123,20 +137,23 @@ def parse_ip(ip, mode='address'):
 def parse_port(port):
     if port < 0 or port > 65535:
         print('[ {} ]: \'{}\' is not a valid port number.'.format(str(datetime.datetime.now()), port))
-        raise
+        exit(1)
     return port
 
 # Splits a 'host:post' formatted string (as wanted from the script arguments) in two (to a dictionary) with regular expressions, and handles some possible bad inputs. 
 def parse_destination(dest_info_raw):
     dest_info = {}
     try:
-        dest_info['host'] =     re.findall('^.+(?=:)',   dest_info_raw)[0]
-        dest_info['port'] = int(re.findall('(?<=:)\d+$', dest_info_raw)[0])
+        dest_info['host'] = re.findall('^.+(?=:)',   dest_info_raw)[0]
+        dest_info['port'] = re.findall('(?<=:)\d+$', dest_info_raw)[0]
     except IndexError:
         print('[ {} ]: \'{}\' was not recognized as a valid host:port combination.'.format(str(datetime.datetime.now()), dest_info_raw))
-        raise
+        exit(1)
     dest_info['host'] = parse_ip(dest_info['host'])
-    dest_info['port'] = parse_port(dest_info['port'])
+    if dest_info['host'] is None:
+        exit(1)
+    dest_info['host'] = str(dest_info['host'])
+    dest_info['port'] = parse_port(int(dest_info['port']))
     return (dest_info['host'], dest_info['port'])
 
 # Opens a file IP and IP subnets and puts the entries into a list that can be iterated, and handles some possible bad inputs.
@@ -148,10 +165,10 @@ def parse_whitelist(whitelist_src):
             f = open(whitelist_src, 'r')
         except FileNotFoundError:
             log('The file given at \'{}\' was not found.'.format(whitelist_src))
-            raise
+            exit(1)
         except PermissionError:
             log('Access to the file given at \'{}\' was denied.'.format(whitelist_src))
-            raise
+            exit(1)
         whitelist = f.read().split('\n')
         for i in range(len(whitelist)):
             entry = parse_ip(whitelist[i], mode='network')
@@ -192,8 +209,6 @@ def main():
     server           = Server(port, real_destination, fake_destination, whitelist, args.blacklist_mode, localhost_mode=False)
     server_localhost.start()
     server.start()
-    server_localhost.close()
-    server.close()
     
     exit(0)
 
