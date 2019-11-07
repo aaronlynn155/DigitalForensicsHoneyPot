@@ -78,6 +78,7 @@ class Server:
             exit(1)
         self.proxy_socket.listen(5)
         self.listener = threading.Thread(target=self.__handler)
+        print('[ {} ]: Proxy server started listening on {}:{}.'.format(str(datetime.datetime.now()), self.proxy_ipport[0], self.proxy_ipport[1]))
         self.listener.start()
     
     def __handler(self):
